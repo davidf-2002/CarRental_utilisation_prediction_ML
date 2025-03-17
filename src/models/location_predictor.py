@@ -156,39 +156,40 @@ class LocationPredictor:
             
         except Exception as e:
             raise ValueError(f"Error training models: {str(e)}")
-    
+
     def predict_future_demand(self, future_dates: List[pd.Timestamp], locations: List[str], vehicle_types: List[str], historical_averages: pd.DataFrame) -> pd.DataFrame:
         """Predict demand for given locations and vehicle types"""
         try:
             # Validate inputs
             if not future_dates or not locations or not vehicle_types:
                 raise ValueError("Must provide at least one date, location, and vehicle type")
-            
+
             # Create combinations
             combinations = [(d, l, v) for d in future_dates for l in locations for v in vehicle_types]
             pred_data = pd.DataFrame(combinations, columns=['date', 'pickUp.city', 'vehicle.type'])
 
 
-            # Add required columns with historical averages
-            # Merge historical data for the relevant combination of month, location, and vehicle type
-            pred_data['month'] = pred_data['date'].dt.month
+            # # Ensure 'date' column is in datetime format
+            # pred_data['date'] = pd.to_datetime(pred_data['date'])
+            #
+            # # Add required columns with historical averages
+            # # Merge historical data for the relevant combination of month, location, and vehicle type
+            # pred_data['month'] = pred_data['date'].dt.month
 
             # Merge the historical averages with the prediction data
             pred_data = pred_data.merge(historical_averages, on=['pickUp.city', 'vehicle.type', 'month'], how='left')
 
             # Ensure that we have filled all columns
             pred_data['dropoff_date'] = pred_data['date'] + pd.Timedelta(days=pred_data['rental_duration'])
-            pred_data['rental_duration'] = pred_data['rental_duration'].fillna(
-                1)  # Use historical average or default to 1 if NaN
-            pred_data['rate.daily'] = pred_data['rate.daily'].fillna(
-                100)  # Use historical average or default to 100 if NaN
-            pred_data['rating'] = pred_data['rating'].fillna(4.0)  # Use historical average or default to 4.0 if NaN
+            pred_data['rental_duration'] = pred_data['rental_duration']
+            pred_data['rate.daily'] = pred_data['rate.daily']
+            pred_data['rating'] = pred_data['rating']
 
 
             # Get predictions
             X_pred, _ = self.prepare_features(pred_data)
             predictions = np.maximum(0, self.demand_model.predict(X_pred))  # Ensure non-negative predictions
-            
+
             # Create results dataframe with proper formatting
             results = pd.DataFrame({
                 'date': pd.to_datetime(pred_data['date']),
@@ -196,15 +197,15 @@ class LocationPredictor:
                 'vehicle_type': pred_data['vehicle.type'],
                 'predicted_demand': predictions.round(1)
             })
-            
+
             # Sort by date and location for better readability
             results = results.sort_values(['date', 'location', 'vehicle_type'])
-            
+
             return results
-            
+
         except Exception as e:
             raise ValueError(f"Error predicting demand: {str(e)}")
-    
+
     def recommend_vehicle_types(self, location: str, date: pd.Timestamp) -> pd.DataFrame:
         """Recommend vehicle types for a given location and date"""
         try:
