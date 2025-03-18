@@ -158,91 +158,158 @@ class LocationPredictor:
         except Exception as e:
             raise ValueError(f"Error training models: {str(e)}")
 
-    def predict_future_demand(self, future_dates: List[pd.Timestamp], locations: List[str], vehicle_types: List[str], df: pd.DataFrame) -> pd.DataFrame:
-        """Predict demand for given locations and vehicle types"""
-        try:
-            # Validate inputs
-            if not future_dates or not locations or not vehicle_types:
-                raise ValueError("Must provide at least one date, location, and vehicle type")
+    def predict_seasonal_demand(
+            self,
+            df: pd.DataFrame,
+            location: str,
+            vehicle_types: list
+    ) -> pd.DataFrame:
+        """
+        Predict future seasonal demand for a single location across multiple vehicle types.
 
-            # Compute rental duration in historical data if missing
-            if 'rental_duration' not in df.columns:
-                df['rental_duration'] = (df['dropoff_date'] - df['date']).dt.days
+        Parameters:
+        -----------
+        df : pd.DataFrame
+            Historical data containing at least the columns:
+            [date, location, vehicle_type, demand]
+        location : str
+            The chosen single location.
+        vehicle_types : list
+            List of vehicle types to predict demand for.
 
-            # Create combinations
-            combinations = [(d, l, v) for d in future_dates for l in locations for v in vehicle_types]
-            pred_data = pd.DataFrame(combinations, columns=['date', 'pickUp.city', 'vehicle.type'])
+        Returns:
+        --------
+        pd.DataFrame
+            A DataFrame with columns:
+            [season, location, vehicle_type, predicted_demand]
+        """
 
+        # -------------------------------------------------------------------------
+        # 1. Define Future Seasons (Simple Approximation)
+        #    Adjust specific dates as needed or compute from the current date
+        # -------------------------------------------------------------------------
+        # For demonstration, let's define the next four seasons by name only:
+        future_seasons = ["Spring", "Summer", "Autumn", "Winter"]
 
+        # -------------------------------------------------------------------------
+        # 2. Prepare Historical Data
+        # -------------------------------------------------------------------------
+        # Ensure date column is datetime
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
 
-            # use the combinations data to get the following:
-                # pred_data['rental_duration'] - average historical rental duration of the given location and vehicle_type for each month of the year
-                    # remember rental_duration is dropoff_date - pickup_date
+        # Filter for the chosen location
+        df_location = df[df["location"] == location].copy()
 
-                # pred_data['rate.daily'] - average rate of the given location and vehicle_type for each month of the year
+        # Drop rows that have missing demand or vehicle_type info
+        df_location.dropna(subset=["demand", "vehicle_type"], inplace=True)
 
-            # Add month column to pred_data for merging
-            pred_data['month'] = pred_data['date'].dt.month
+        # Create a "season" column in df, so we know which historical season it belongs to
+        # (Simplistic assignment based on month. Adjust for your region if needed.)
+        def get_season(dt):
+            month = dt.month
+            if 3 <= month <= 5:
+                return "Spring"
+            elif 6 <= month <= 8:
+                return "Summer"
+            elif 9 <= month <= 11:
+                return "Autumn"
+            else:
+                return "Winter"
 
-            # Group historical data by city, vehicle type, and month
-            df['month'] = df['date'].dt.month
-            grouped = (
-                df
-                .groupby(['pickUp.city', 'vehicle.type', 'month'], as_index=False)
-                .agg(
-                    avg_rental_duration=('rental_duration', 'mean'),
-                    avg_rate_daily=('rate.daily', 'mean'),
-                    avg_rating=('rating', 'mean'),
-                    demand=('vehicle.type', 'count')
-                )
-            )
+        df_location["season"] = df_location["date"].apply(get_season)
 
-            # Merge averages onto pred_data
-            pred_data = pred_data.merge(grouped, on=['pickUp.city', 'vehicle.type', 'month'], how='left')
-
-            # Use historical averages for rental_duration and rate.daily
-            # If there is no matching historical data, fill with defaults
-            pred_data['rental_duration'] = pred_data['avg_rental_duration'].fillna(1)
-            pred_data['rate.daily'] = pred_data['avg_rate_daily'].fillna(100)
-            pred_data['rating'] = pred_data['avg_rating'].fillna(4)
-            pred_data['demand'] = pred_data['demand'].fillna(1)
-
-            # Show data in Streamlit
-            streamlit.subheader('Future Data Based On Previous Months')
-            streamlit.dataframe(pred_data)
-
-            # Drop columns not needed in final output
-            pred_data.drop(['avg_rental_duration', 'avg_rate_daily', 'month', 'avg_rating'], axis=1, inplace=True)
-
-
-
-
-
-
-
-
-            # Get predictions
-            X_pred, _ = self.prepare_features(pred_data)
-            predictions = np.maximum(0, self.demand_model.predict(X_pred))  # Ensure non-negative predictions
-
-            # Create results dataframe with proper formatting
-            results = pd.DataFrame({
-                'date': pd.to_datetime(pred_data['date']),
-                'location': pred_data['pickUp.city'],
-                'vehicle_type': pred_data['vehicle.type'],
-                'predicted_demand': predictions.round(1)
+        # -------------------------------------------------------------------------
+        # 3. Derive Features (Example: average rate, rating, etc. if available)
+        # -------------------------------------------------------------------------
+        # Suppose df has 'rate' and 'rating' columns:
+        # We'll compute monthly or seasonal aggregates.
+        # For demonstration, let's just group by (vehicle_type, season)
+        # and compute average demand, average rate, average rating.
+        # You can add more features for better accuracy.
+        grouped = (
+            df_location
+            .groupby(["vehicle_type", "season"], as_index=False)
+            .agg({
+                "demand": "mean",
+                # Uncomment if these columns exist:
+                # "rate": "mean",
+                # "rating": "mean"
             })
+            .rename(columns={"demand": "avg_historical_demand"})
+        )
 
-            streamlit.subheader('Predicted Demand Data')
-            streamlit.dataframe(results)
+        # -------------------------------------------------------------------------
+        # 4. Prepare a Training Dataset (Supervised)
+        # -------------------------------------------------------------------------
+        # Each row in the training set will represent a historical (vehicle_type, season)
+        # plus any other features. The target is "avg_historical_demand".
+        train_df = grouped.copy()
+        # Hypothetical: if we had 'avg_rate' or 'avg_rating' from the groupby, you’d keep them as features.
+        # For now, we only have 'vehicle_type', 'season', and 'avg_historical_demand'.
 
-            # Sort by date and location for better readability
-            results = results.sort_values(['date', 'location', 'vehicle_type'])
+        # Map seasons to numeric values for easier model handling
+        season_map = {"Spring": 0, "Summer": 1, "Autumn": 2, "Winter": 3}
+        train_df["season_num"] = train_df["season"].map(season_map)
 
-            return results
+        # Next, one-hot-encode or map vehicle types to numeric
+        # We'll do a simple numeric mapping for example:
+        unique_vehicle_types = train_df["vehicle_type"].unique().tolist()
+        vehicle_map = {v: i for i, v in enumerate(unique_vehicle_types)}
+        train_df["vehicle_type_num"] = train_df["vehicle_type"].map(vehicle_map)
 
-        except Exception as e:
-            raise ValueError(f"Error predicting demand: {str(e)}")
+        # Now define X (features) and y (target)
+        X_train = train_df[["season_num", "vehicle_type_num"]]
+        y_train = train_df["avg_historical_demand"]
+
+        # -------------------------------------------------------------------------
+        # 5. Train a Model (Example: Random Forest)
+        # -------------------------------------------------------------------------
+        # If there's insufficient data, consider simpler models or data augmentation.
+        if len(X_train) < 2:
+            streamlit.warning("Not enough historical data to train a supervised model reliably.")
+            # Return an empty or fallback DataFrame
+            return pd.DataFrame(columns=["season", "location", "vehicle_type", "predicted_demand"])
+
+        model = RandomForestRegressor(random_state=42)
+        model.fit(X_train, y_train)
+
+        # -------------------------------------------------------------------------
+        # 6. Predict for Upcoming Seasons
+        # -------------------------------------------------------------------------
+        # Build the future combinations: each of the next 4 seasons for each vehicle type
+        future_combinations = []
+        for season in future_seasons:
+            for vt in vehicle_types:
+                future_combinations.append((season, vt))
+
+        future_df = pd.DataFrame(future_combinations, columns=["season", "vehicle_type"])
+
+        # Map them to numeric encodings
+        future_df["season_num"] = future_df["season"].map(season_map)
+        future_df["vehicle_type_num"] = future_df["vehicle_type"].map(vehicle_map)
+
+        # For vehicle types unseen in training, fill with a default or skip them
+        future_df["vehicle_type_num"].fillna(-1, inplace=True)  # placeholder if unknown
+
+        # Make predictions
+        X_pred = future_df[["season_num", "vehicle_type_num"]]
+        preds = model.predict(X_pred)
+
+        # Build final results
+        future_df["predicted_demand"] = preds
+        future_df["location"] = location
+
+        # Drop numeric helper columns
+        future_df.drop(["season_num", "vehicle_type_num"], axis=1, inplace=True)
+
+        # Sort results for readability
+        future_df.sort_values(["season", "vehicle_type"], inplace=True)
+
+        # Reorder columns
+        future_df = future_df[["season", "location", "vehicle_type", "predicted_demand"]]
+
+        return future_df
+
 
     def recommend_vehicle_types(self, location: str, date: pd.Timestamp) -> pd.DataFrame:
         """Recommend vehicle types for a given location and date"""

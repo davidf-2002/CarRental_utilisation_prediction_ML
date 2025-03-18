@@ -94,7 +94,7 @@ def main():
         st.header("2. Future Predictions")
         
         locations = sorted(df['pickUp.city'].unique())
-        vehicle_types = sorted(df['vehicle.type'].unique())
+        vehicle_types = sorted(df['vehicle.type'].unique().tolist())
         
         try:
             predictor = LocationPredictor()
@@ -169,13 +169,38 @@ def main():
                     pd.Timestamp(selected_date) + pd.DateOffset(months=i)
                     for i in range(12)
                 ]
-                
-                # Get demand predictions
-                predictions = predictor.predict_future_demand(
-                    future_dates,
-                    [selected_location],
-                    vehicle_types,
+
+                df.rename(columns={"pickUp.city": "location"}, inplace=True)
+                df.rename(columns={"vehicle.type": "vehicle_type"}, inplace=True)
+
+                # Example DataFrame with pickup_date and columns
+                df['pickup_date'] = pd.to_datetime(df['pickup_date'], errors='coerce')
+                df['pickup_date_quarter'] = df['pickup_date'].dt.quarter
+                df['pickup_date_year'] = df['pickup_date'].dt.year
+
+                # Group to create quarterly demand counts
+                demand_df = (
                     df
+                    .groupby(["location", "vehicle_type", "pickup_date_year", "pickup_date_quarter"])
+                    .size()
+                    .reset_index(name="demand")
+                )
+
+                # Merge demand counts back
+                df = df.merge(
+                    demand_df,
+                    on=["location", "vehicle_type", "pickup_date_year", "pickup_date_quarter"],
+                    how="left"
+                )
+
+                st.write(df)
+
+
+                # Get demand predictions
+                predictions = predictor.predict_seasonal_demand(
+                    df,
+                    selected_location,
+                    vehicle_types
                 )
                 
                 # Display demand forecast
@@ -184,18 +209,18 @@ def main():
                 # Create main demand forecast plot
                 fig_demand = px.line(
                     predictions,
-                    x='date',
+                    x='season',
                     y='predicted_demand',
                     color='vehicle_type',
-                    title=f'12-Month Demand Forecast for {selected_location}',
+                    title=f'Seasonal Demand Forecast for {selected_location}',
                     labels={
+                        'season': 'Season',
                         'predicted_demand': 'Predicted Demand',
-                        'date': 'Month',
                         'vehicle_type': 'Vehicle Type'
                     }
                 )
                 fig_demand.update_layout(
-                    xaxis_title="Month",
+                    xaxis_title="Season",
                     yaxis_title="Predicted Demand",
                     height=500,
                     legend_title="Vehicle Type",
