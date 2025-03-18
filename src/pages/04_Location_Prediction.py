@@ -163,27 +163,19 @@ def main():
                 if not hasattr(predictor.demand_model, 'feature_importances_'):
                     st.error("The demand prediction model needs to be trained first. Please use the 'Train Model' button above.")
                     return
-                
+
                 # Generate future dates
                 future_dates = [
                     pd.Timestamp(selected_date) + pd.DateOffset(months=i)
                     for i in range(12)
                 ]
-
-                # Calculate monthly averages for rental_duration, rate.daily, and rating
-                df['month'] = df['pickup_date'].dt.month  # Extract month from the pickup date
-                historical_averages = df.groupby(['pickUp.city', 'vehicle.type', 'month']).agg({
-                    'rental_duration': 'mean',  # Average rental duration for each combination
-                    'rate.daily': 'mean',  # Average daily rate for each combination
-                    'rating': 'mean'  # Average rating for each combination
-                }).reset_index()
                 
                 # Get demand predictions
                 predictions = predictor.predict_future_demand(
                     future_dates,
                     [selected_location],
                     vehicle_types,
-                    historical_averages
+                    df
                 )
                 
                 # Display demand forecast

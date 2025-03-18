@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import streamlit
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
@@ -157,33 +158,67 @@ class LocationPredictor:
         except Exception as e:
             raise ValueError(f"Error training models: {str(e)}")
 
-    def predict_future_demand(self, future_dates: List[pd.Timestamp], locations: List[str], vehicle_types: List[str], historical_averages: pd.DataFrame) -> pd.DataFrame:
+    def predict_future_demand(self, future_dates: List[pd.Timestamp], locations: List[str], vehicle_types: List[str], df: pd.DataFrame) -> pd.DataFrame:
         """Predict demand for given locations and vehicle types"""
         try:
             # Validate inputs
             if not future_dates or not locations or not vehicle_types:
                 raise ValueError("Must provide at least one date, location, and vehicle type")
 
+            # Compute rental duration in historical data if missing
+            if 'rental_duration' not in df.columns:
+                df['rental_duration'] = (df['dropoff_date'] - df['date']).dt.days
+
             # Create combinations
             combinations = [(d, l, v) for d in future_dates for l in locations for v in vehicle_types]
             pred_data = pd.DataFrame(combinations, columns=['date', 'pickUp.city', 'vehicle.type'])
 
 
-            # # Ensure 'date' column is in datetime format
-            # pred_data['date'] = pd.to_datetime(pred_data['date'])
-            #
-            # # Add required columns with historical averages
-            # # Merge historical data for the relevant combination of month, location, and vehicle type
-            # pred_data['month'] = pred_data['date'].dt.month
 
-            # Merge the historical averages with the prediction data
-            pred_data = pred_data.merge(historical_averages, on=['pickUp.city', 'vehicle.type', 'month'], how='left')
+            # use the combinations data to get the following:
+                # pred_data['rental_duration'] - average historical rental duration of the given location and vehicle_type for each month of the year
+                    # remember rental_duration is dropoff_date - pickup_date
 
-            # Ensure that we have filled all columns
-            pred_data['dropoff_date'] = pred_data['date'] + pd.Timedelta(days=pred_data['rental_duration'])
-            pred_data['rental_duration'] = pred_data['rental_duration']
-            pred_data['rate.daily'] = pred_data['rate.daily']
-            pred_data['rating'] = pred_data['rating']
+                # pred_data['rate.daily'] - average rate of the given location and vehicle_type for each month of the year
+
+            # Add month column to pred_data for merging
+            pred_data['month'] = pred_data['date'].dt.month
+
+            # Group historical data by city, vehicle type, and month
+            df['month'] = df['date'].dt.month
+            grouped = (
+                df
+                .groupby(['pickUp.city', 'vehicle.type', 'month'], as_index=False)
+                .agg(
+                    avg_rental_duration=('rental_duration', 'mean'),
+                    avg_rate_daily=('rate.daily', 'mean'),
+                    avg_rating=('rating', 'mean'),
+                    demand=('vehicle.type', 'count')
+                )
+            )
+
+            # Merge averages onto pred_data
+            pred_data = pred_data.merge(grouped, on=['pickUp.city', 'vehicle.type', 'month'], how='left')
+
+            # Use historical averages for rental_duration and rate.daily
+            # If there is no matching historical data, fill with defaults
+            pred_data['rental_duration'] = pred_data['avg_rental_duration'].fillna(1)
+            pred_data['rate.daily'] = pred_data['avg_rate_daily'].fillna(100)
+            pred_data['rating'] = pred_data['avg_rating'].fillna(4)
+            pred_data['demand'] = pred_data['demand'].fillna(1)
+
+            # Show data in Streamlit
+            streamlit.subheader('Future Data Based On Previous Months')
+            streamlit.dataframe(pred_data)
+
+            # Drop columns not needed in final output
+            pred_data.drop(['avg_rental_duration', 'avg_rate_daily', 'month', 'avg_rating'], axis=1, inplace=True)
+
+
+
+
+
+
 
 
             # Get predictions
@@ -197,6 +232,9 @@ class LocationPredictor:
                 'vehicle_type': pred_data['vehicle.type'],
                 'predicted_demand': predictions.round(1)
             })
+
+            streamlit.subheader('Predicted Demand Data')
+            streamlit.dataframe(results)
 
             # Sort by date and location for better readability
             results = results.sort_values(['date', 'location', 'vehicle_type'])
