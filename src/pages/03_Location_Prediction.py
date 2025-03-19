@@ -9,8 +9,7 @@ from models.location_predictor import LocationPredictor
 st.set_page_config(page_title="Location Demand Prediction", layout="wide")
 
 DATA_PATH = os.path.join("data", "processed_car_rental.csv")
-MODEL_PATH = os.path.join("models", "location_predictor.joblib")
-
+MODEL_PATH = os.path.join("models", "vehicle_recommender.joblib")
 
 # Utility Functions
 def load_data(data_path: str) -> pd.DataFrame:
@@ -40,7 +39,6 @@ def load_data(data_path: str) -> pd.DataFrame:
 
     return df
 
-
 def display_dataset_info(df: pd.DataFrame):
     """
     Displays a quick overview of the dataset: number of records, date range, and used columns.
@@ -51,7 +49,6 @@ def display_dataset_info(df: pd.DataFrame):
     date_max = df['date'].max().date()
     st.write(f"Date range: {date_min} to {date_max}")
 
-
 def display_feature_info():
     """
     Displays the primary features used in the model.
@@ -61,39 +58,40 @@ def display_feature_info():
     st.write("- Vehicle: Type, Historical performance")
     st.write("- Location: Historical demand, ratings")
 
-
 def train_models(df: pd.DataFrame) -> None:
     """
-    Trains the demand prediction and vehicle type recommendation models,
-    then displays training metrics and saves the trained models to disk.
+    Trains the vehicle type recommendation model,
+    displays training metrics,
+    and saves the trained models to disk.
     """
-    # Validate required columns
     required_cols = ["pickup_city", "vehicle_type", "pickup_date", "rate.daily", "rating"]
     missing_cols = [col for col in required_cols if col not in df.columns]
+
     if missing_cols:
         st.error(f"Missing required columns: {', '.join(missing_cols)}")
         return
 
-    try:
-        st.spinner("Training models...")  # Shows a spinner in the UI
-        predictor = LocationPredictor()
-        metrics = predictor.train(df)
+    predictor = LocationPredictor()
 
-        # Model metrics
+    try:
+        with st.spinner("Training models..."):
+            metrics = predictor.train(df)
+
+        # Display success and metrics
         st.success("Models trained successfully!")
         st.subheader("Model Performance")
 
         # Vehicle model metrics
-        st.write("Vehicle Type Recommendation Model:")
+        vehicle_metrics = metrics["vehicle_metrics"]
+        st.write("**Vehicle Type Recommendation Model**:")
         c1, c2 = st.columns(2)
         with c1:
-            st.metric("Accuracy", f"{metrics['vehicle_metrics']['accuracy']:.3f}")
+            st.metric("Accuracy", f"{vehicle_metrics['accuracy']:.3f}")
         with c2:
             st.text("Classification Report:")
-            st.text(metrics['vehicle_metrics']['classification_report'])
+            st.text(vehicle_metrics['classification_report'])
 
         # Save model
-        os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
         predictor.save_model(MODEL_PATH)
         st.success("Model saved successfully! You can now make predictions.")
 
@@ -101,18 +99,16 @@ def train_models(df: pd.DataFrame) -> None:
         st.error(f"Error training model: {str(e)}")
         st.error("Please ensure the data format is correct and try again.")
 
-
 def predict_future(df: pd.DataFrame) -> None:
     """
     Loads the trained model, then provides:
      - Vehicle type recommendations for a user-selected date and location.
-     - Seasonal demand forecasts across multiple vehicle types.
+     - (Optionally) any other forecast or analysis you'd like to add.
     """
-    if not os.path.exists(MODEL_PATH):
+    if not os.path.exists(MODEL_PATH + "_xgb_model.json"):
         st.warning("Please train the model before making predictions.")
         return
 
-    # Load model
     predictor = LocationPredictor()
     predictor.load_model(MODEL_PATH)
 
@@ -122,8 +118,8 @@ def predict_future(df: pd.DataFrame) -> None:
     if "vehicle_type" in df.columns:
         df.rename(columns={"vehicle_type": "vehicle_type"}, inplace=True)
 
+    # Prepare location and vehicle type lists
     locations = sorted(df["location"].dropna().unique().tolist())
-    vehicle_types = sorted(df["vehicle_type"].dropna().unique().tolist())
 
     st.subheader("Vehicle Recommendations")
     selected_location = st.selectbox("Select Location:", locations)
@@ -132,13 +128,13 @@ def predict_future(df: pd.DataFrame) -> None:
         pd.Timestamp.now() + pd.Timedelta(days=30)
     )
 
-    # Check if model is trained
+    # If the vehicle model has not been trained or loaded, stop
     if not hasattr(predictor.vehicle_model, "classes_"):
         st.error("The vehicle type model is not trained. Please train it first.")
         return
 
     try:
-        # Vehicle type recommendation
+        # Make recommendations
         recommendations = predictor.recommend_vehicle_types(
             selected_location,
             pd.Timestamp(selected_date)
@@ -160,6 +156,7 @@ def predict_future(df: pd.DataFrame) -> None:
                 height=400
             )
             st.plotly_chart(fig_rec)
+
         with colB:
             st.subheader("Top 3")
             for _, row in recommendations.head(3).iterrows():
@@ -174,14 +171,11 @@ def predict_future(df: pd.DataFrame) -> None:
 
     except Exception as e:
         st.error(f"Error getting vehicle recommendations: {str(e)}")
-        return
 
     # Demand forecast
     st.subheader("Demand Forecast")
 
     # Create / rename columns if needed
-    # df["pickup_date"] = pd.to_datetime(df["pickup_date"], errors="coerce")
-    # df["pickup_date_quarter"] = df["pickup_date"].dt.quarter
     df["pickup_date_year"] = df["pickup_date"].dt.year
 
     # Group to create quarterly demand
@@ -192,6 +186,8 @@ def predict_future(df: pd.DataFrame) -> None:
     )
 
     df = df.merge(demand_df, on=["location", "vehicle_type", "pickup_date_year", "pickup_date_quarter"], how="left")
+
+    vehicle_types = sorted(df["vehicle_type"].dropna().unique().tolist())
 
     # Get seasonal demand predictions
     try:
