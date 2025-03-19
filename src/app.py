@@ -149,15 +149,6 @@ def main():
         fig_heatmap.update_layout(xaxis_tickangle=-45)
         st.plotly_chart(fig_heatmap)
 
-        # 3. Seasonal Trends
-        st.subheader("3. Seasonal Trends")
-        df_seasonal = extract_datetime_features(df.copy(), 'pickup_date')
-        monthly_type_dist = df_seasonal.groupby(['pickup_date_month', 'vehicle.type']).size().reset_index(name='count')
-        fig_seasonal = px.line(monthly_type_dist, x='pickup_date_month', y='count', color='vehicle.type',
-                             title='Monthly Rental Trends by Vehicle Type',
-                             labels={'pickup_date_month': 'Month', 'count': 'Number of Rentals', 'vehicle.type': 'Vehicle Type'})
-        st.plotly_chart(fig_seasonal)
-
         # Model Training Section
         st.header("Model Training")
         # Select target column

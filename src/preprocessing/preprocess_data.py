@@ -60,8 +60,8 @@ def main():
     # Encode categorical variables
     print("\nEncoding categorical variables...")
     categorical_cols = df.select_dtypes(include=['object', 'category']).columns
-    df = encode_categorical_variables(df, columns=categorical_cols)
-    
+    df, encoders = encode_categorical_variables(df, columns=categorical_cols)
+
     # Save processed dataset
     print("\nSaving processed dataset...")
     df.to_csv(output_file, index=False)

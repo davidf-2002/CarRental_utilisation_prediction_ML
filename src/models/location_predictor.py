@@ -1,275 +1,262 @@
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
-from sklearn.metrics import mean_squared_error, r2_score, accuracy_score, classification_report
+import os
 import joblib
-from typing import Tuple, Dict, List
+import numpy as np
+import pandas as pd
 import logging
-from datetime import timedelta
+import xgboost as xgb
+from typing import Dict, List, Tuple, Any
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.metrics import (
+    mean_squared_error,
+    r2_score,
+    accuracy_score,
+    classification_report
+)
+
 
 class LocationPredictor:
     def __init__(self):
-        self.demand_model = RandomForestRegressor(n_estimators=100, max_depth=15, random_state=42)
-        self.vehicle_model = RandomForestClassifier(n_estimators=100, max_depth=15, random_state=42)
+        self.vehicle_model = None
         self.location_encoder = LabelEncoder()
         self.vehicle_type_encoder = LabelEncoder()
-        self.scaler = StandardScaler()
-        self.feature_importance = None
-        
-    def prepare_features(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
-        """Prepare features for prediction"""
-        try:
-            # Create temporal features from date
-            df['date'] = pd.to_datetime(df['date'] if 'date' in df.columns else df['pickup_date'])
-            df['month'] = df['date'].dt.month
-            df['day_of_week'] = df['date'].dt.dayofweek
-            df['is_weekend'] = df['date'].dt.dayofweek.isin([5, 6]).astype(int)
-            df['season'] = pd.cut(df['month'], 
-                                bins=[0, 3, 6, 9, 12], 
-                                labels=['Winter', 'Spring', 'Summer', 'Fall'])
-            
-            # Calculate rental duration if needed
-            if 'rental_duration' not in df.columns and 'dropoff_date' in df.columns:
-                df['rental_duration'] = (pd.to_datetime(df['dropoff_date']) - df['date']).dt.total_seconds() / (24 * 3600)
-                df['rental_duration'] = df['rental_duration'].fillna(1)
-            
-            # Ensure required columns exist
-            required_cols = ['pickUp.city', 'rate.daily', 'rating']
-            missing_cols = [col for col in required_cols if col not in df.columns]
-            if missing_cols:
-                raise ValueError(f"Missing required columns: {', '.join(missing_cols)}")
-            
-            # Encode categorical variables
-            df['location_encoded'] = self.location_encoder.fit_transform(df['pickUp.city'])
-            
-            # Always include vehicle_type_encoded, using a default if not present
-            if 'vehicle.type' in df.columns:
-                df['vehicle_type_encoded'] = self.vehicle_type_encoder.transform(df['vehicle.type'])
-            else:
-                # If no vehicle type provided, use a neutral encoding (mean of all types)
-                n_classes = len(self.vehicle_type_encoder.classes_)
-                df['vehicle_type_encoded'] = np.mean(range(n_classes))
-            
-            # Calculate location metrics
-            agg_dict = {
-                'rate.daily': ['mean', 'std'],
-                'rating': 'mean'
-            }
-            if 'rental_duration' in df.columns:
-                agg_dict['rental_duration'] = ['mean', 'std']
-            
-            metrics = df.groupby('pickUp.city').agg(agg_dict).fillna(0)
-            
-            # Flatten column names
-            metrics.columns = ['avg_duration', 'std_duration', 'avg_rate', 'std_rate', 'avg_rating'] \
-                if 'rental_duration' in df.columns else ['avg_rate', 'std_rate', 'avg_rating']
-            metrics = metrics.reset_index()
-            
-            # Merge metrics back
-            df = df.merge(metrics, on='pickUp.city', how='left')
-            
-            # Select features
-            base_features = [
-                'month', 'day_of_week', 'is_weekend',
-                'avg_rate', 'std_rate', 'avg_rating',
-                'vehicle_type_encoded'  # Always include vehicle type
-            ]
-            
-            if 'rental_duration' in df.columns:
-                base_features.extend(['avg_duration', 'std_duration'])
-            
-            X = df[base_features].fillna(0)
-            X_scaled = pd.DataFrame(self.scaler.fit_transform(X), columns=base_features)
-            
-            feature_info = {
-                'location_mapping': dict(zip(self.location_encoder.classes_, self.location_encoder.transform(self.location_encoder.classes_))),
-                'vehicle_type_mapping': dict(zip(self.vehicle_type_encoder.classes_, self.vehicle_type_encoder.transform(self.vehicle_type_encoder.classes_))),
-                'features': base_features
-            }
-            
-            return X_scaled, feature_info
-            
-        except Exception as e:
-            raise ValueError(f"Error preparing features: {str(e)}")
-    
-    def train(self, df: pd.DataFrame) -> Dict:
-        """Train both demand prediction and vehicle type recommendation models"""
-        try:
-            # Validate required columns
-            required_cols = ['pickUp.city', 'vehicle.type', 'pickup_date', 'rate.daily', 'rating']
-            missing_cols = [col for col in required_cols if col not in df.columns]
-            if missing_cols:
-                raise ValueError(f"Missing required columns for training: {', '.join(missing_cols)}")
-            
-            # Ensure date columns are datetime
-            df['date'] = pd.to_datetime(df['pickup_date'])
-            if 'dropoff_date' in df.columns:
-                df['dropoff_date'] = pd.to_datetime(df['dropoff_date'])
-            
-            # First fit the vehicle type encoder so it's available for feature preparation
-            self.vehicle_type_encoder.fit(df['vehicle.type'].unique())
-            
-            # Calculate demand per location and vehicle type
-            demand = df.groupby(['pickUp.city', 'vehicle.type', 'date']).size().reset_index(name='demand')
-            merged_data = demand.merge(df, on=['pickUp.city', 'vehicle.type', 'date'], how='left')
-            
-            # Train demand prediction model
-            X, feature_info = self.prepare_features(merged_data)
-            y_demand = merged_data['demand']
-            
-            X_train, X_test, y_train, y_test = train_test_split(X, y_demand, test_size=0.2, random_state=42)
-            self.demand_model.fit(X_train, y_train)
-            
-            # Calculate demand model metrics
-            y_pred = self.demand_model.predict(X_test)
-            self.feature_importance = dict(zip(X.columns, self.demand_model.feature_importances_))
-            
-            demand_metrics = {
-                'r2_score': r2_score(y_test, y_pred),
-                'rmse': np.sqrt(mean_squared_error(y_test, y_pred)),
-                'feature_importance': self.feature_importance
-            }
-            
-            # Train vehicle type recommendation model
-            df_vehicle = df.copy()
-            df_vehicle['date'] = df_vehicle['pickup_date']  # Ensure date column exists
-            X_vehicle, _ = self.prepare_features(df_vehicle)
-            y_vehicle = self.vehicle_type_encoder.transform(df_vehicle['vehicle.type'])  # Already fitted above
-            
-            X_train_v, X_test_v, y_train_v, y_test_v = train_test_split(X_vehicle, y_vehicle, test_size=0.2, random_state=42)
-            self.vehicle_model.fit(X_train_v, y_train_v)
-            
-            # Calculate vehicle model metrics
-            y_pred_v = self.vehicle_model.predict(X_test_v)
-            vehicle_metrics = {
-                'accuracy': accuracy_score(y_test_v, y_pred_v),
-                'classification_report': classification_report(y_test_v, y_pred_v, 
-                    target_names=self.vehicle_type_encoder.classes_)
-            }
-            
-            return {
-                'demand_metrics': demand_metrics,
-                'vehicle_metrics': vehicle_metrics
-            }
-            
-        except Exception as e:
-            raise ValueError(f"Error training models: {str(e)}")
-    
-    def predict_future_demand(self, future_dates: List[pd.Timestamp], locations: List[str], vehicle_types: List[str], historical_averages: pd.DataFrame) -> pd.DataFrame:
-        """Predict demand for given locations and vehicle types"""
-        try:
-            # Validate inputs
-            if not future_dates or not locations or not vehicle_types:
-                raise ValueError("Must provide at least one date, location, and vehicle type")
-            
-            # Create combinations
-            combinations = [(d, l, v) for d in future_dates for l in locations for v in vehicle_types]
-            pred_data = pd.DataFrame(combinations, columns=['date', 'pickUp.city', 'vehicle.type'])
+        # Keep track of the feature columns used to train
+        self.feature_cols = [
+            "pickup_city_encoded",
+            "pickup_date_dayofweek",
+            "pickup_date_month",
+            "pickup_date_is_weekend"
+        ]
 
+    def _prepare_vehicle_data(self, df: pd.DataFrame) -> (pd.DataFrame, pd.Series):
+        """
+        Prepare the features (X) and target (y) for vehicle type classification,
+        including encoding of categorical columns and feature engineering.
+        """
 
-            # Add required columns with historical averages
-            # Merge historical data for the relevant combination of month, location, and vehicle type
-            pred_data['month'] = pred_data['date'].dt.month
+        # 1) Encode location and vehicle type
+        #    (Location encoding is for use as a feature; vehicle type is the target)
+        if "pickup_city_encoded" not in df.columns:
+            df["pickup_city_encoded"] = self.location_encoder.transform(df["pickup_city"])
 
-            # Merge the historical averages with the prediction data
-            pred_data = pred_data.merge(historical_averages, on=['pickUp.city', 'vehicle.type', 'month'], how='left')
+        if "vehicle_type_encoded" not in df.columns:
+            df["vehicle_type_encoded"] = self.vehicle_type_encoder.transform(df["vehicle_type"])
 
-            # Ensure that we have filled all columns
-            pred_data['dropoff_date'] = pred_data['date'] + pd.Timedelta(days=pred_data['rental_duration'])
-            pred_data['rental_duration'] = pred_data['rental_duration'].fillna(
-                1)  # Use historical average or default to 1 if NaN
-            pred_data['rate.daily'] = pred_data['rate.daily'].fillna(
-                100)  # Use historical average or default to 100 if NaN
-            pred_data['rating'] = pred_data['rating'].fillna(4.0)  # Use historical average or default to 4.0 if NaN
+        X = df[self.feature_cols].copy()
+        y = df["vehicle_type_encoded"].copy()
+        return X, y
 
+    def train(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Train a multi-class vehicle type recommendation model using an XGBoost classifier.
+        Returns a dictionary containing model performance metrics.
+        """
+        # Validate required columns
+        required_cols = ["pickup_city", "pickup_date"]
+        missing_cols = [c for c in required_cols if c not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns for training: {', '.join(missing_cols)}")
 
-            # Get predictions
-            X_pred, _ = self.prepare_features(pred_data)
-            predictions = np.maximum(0, self.demand_model.predict(X_pred))  # Ensure non-negative predictions
-            
-            # Create results dataframe with proper formatting
-            results = pd.DataFrame({
-                'date': pd.to_datetime(pred_data['date']),
-                'location': pred_data['pickUp.city'],
-                'vehicle_type': pred_data['vehicle.type'],
-                'predicted_demand': predictions.round(1)
-            })
-            
-            # Sort by date and location for better readability
-            results = results.sort_values(['date', 'location', 'vehicle_type'])
-            
-            return results
-            
-        except Exception as e:
-            raise ValueError(f"Error predicting demand: {str(e)}")
-    
+        # Fit label encoders on the entire dataset for consistent encoding
+        self.location_encoder.fit(df["pickup_city"])
+        self.vehicle_type_encoder.fit(df["vehicle_type"])
+
+        # Add date-related features before model preparation
+        df["pickup_date_dayofweek"] = df["pickup_date"].dt.dayofweek
+        df["pickup_date_month"] = df["pickup_date"].dt.month
+        df["pickup_date_is_weekend"] = df["pickup_date_dayofweek"].apply(lambda x: 1 if x >= 5 else 0)
+
+        # Now that the columns are added, check if they're in the DataFrame
+        missing_date_cols = ["pickup_date_dayofweek", "pickup_date_month", "pickup_date_is_weekend"]
+        for col in missing_date_cols:
+            if col not in df.columns:
+                raise ValueError(f"Missing column: {col} in DataFrame.")
+
+        # Prepare data for training
+        X, y = self._prepare_vehicle_data(df)
+
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
+
+        # Create & train XGBoost classifier
+        self.vehicle_model = xgb.XGBClassifier(
+            n_estimators=100,
+            learning_rate=0.1,
+            max_depth=6,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42,
+            use_label_encoder=False,  # Avoids XGBoost's own label-encoding warning
+            eval_metric="mlogloss"
+        )
+        self.vehicle_model.fit(X_train, y_train)
+
+        # Evaluate
+        y_pred = self.vehicle_model.predict(X_test)
+        acc = accuracy_score(y_test, y_pred)
+        clf_report = classification_report(
+            y_test,
+            y_pred,
+            target_names=self.vehicle_type_encoder.classes_
+        )
+
+        vehicle_metrics = {
+            "accuracy": acc,
+            "classification_report": clf_report
+        }
+
+        return {
+            "vehicle_metrics": vehicle_metrics
+        }
+
     def recommend_vehicle_types(self, location: str, date: pd.Timestamp) -> pd.DataFrame:
-        """Recommend vehicle types for a given location and date"""
-        try:
-            # Validate inputs
-            if not location or not date:
-                raise ValueError("Location and date must be provided")
-            
-            if not isinstance(date, pd.Timestamp):
-                date = pd.to_datetime(date)
-            
-            # Ensure model is trained
-            if not hasattr(self.vehicle_model, 'classes_'):
-                raise ValueError("Vehicle recommendation model is not trained")
-            
-            # Create input data for each vehicle type to get features
-            vehicle_types = self.vehicle_type_encoder.classes_
-            input_data = pd.DataFrame([
-                {
-                    'date': date,
-                    'pickUp.city': location,
-                    'dropoff_date': date + pd.Timedelta(days=1),
-                    'rate.daily': 100,  # Default daily rate
-                    'rating': 4.0,  # Default rating
-                    'vehicle.type': vtype  # Add vehicle type
-                } for vtype in vehicle_types
-            ])
-            
-            # Get features
-            X_pred, _ = self.prepare_features(input_data)
-            
-            # Get probabilities for each vehicle type
-            probs = self.vehicle_model.predict_proba(X_pred[:1])  # Only need first row since all rows have same features except vehicle type
-            
-            # Create recommendations dataframe with proper formatting
-            recommendations = pd.DataFrame({
-                'vehicle_type': vehicle_types,
-                'confidence': probs[0]
+        """
+        Recommend vehicle types for a given location and date using the trained classifier.
+        Produces a DataFrame of all vehicle types and their predicted confidence scores.
+        """
+        if not location or not date:
+            raise ValueError("Location and date must be provided.")
+        if not hasattr(self.vehicle_model, "classes_"):
+            raise ValueError("Vehicle recommendation model is not trained.")
+
+        # Build input data for each possible vehicle type
+        vehicle_types_list = self.vehicle_type_encoder.classes_
+        input_data = []
+        for vt in vehicle_types_list:
+            input_data.append({
+                "pickup_date": date,
+                "pickup_city": location,
+                "vehicle_type": vt
             })
-            
-            # Sort by confidence and format percentages
-            recommendations = recommendations.sort_values('confidence', ascending=False)
-            recommendations['confidence'] = recommendations['confidence'].round(3)
-            
-            return recommendations
-            
-        except Exception as e:
-            raise ValueError(f"Error recommending vehicle types: {str(e)}")
-    
-    def save_model(self, path: str):
-        """Save both models and their components"""
+
+        df_input = pd.DataFrame(input_data)
+
+        df_input["pickup_date_dayofweek"] = df_input["pickup_date"].dt.dayofweek
+        df_input["pickup_date_month"] = df_input["pickup_date"].dt.month
+        df_input["pickup_date_is_weekend"] = df_input["pickup_date_dayofweek"].apply(lambda x: 1 if x >= 5 else 0)
+
+        # Prepare features
+        X_input, _ = self._prepare_vehicle_data(df_input)
+
+        # Get predicted probabilities for each class
+        probs = self.vehicle_model.predict_proba(X_input)  # shape => (N_rows, N_classes)
+
+        # Because each row in df_input corresponds to a specific vehicle_type,
+        # we extract the probability that the row’s vehicle type is indeed the correct class.
+        #   i -> index in df_input
+        #   c -> the encoded class for the vehicle type in that row
+        confidences = []
+        for i, row in df_input.iterrows():
+            c = row["vehicle_type_encoded"]
+            confidences.append(probs[i, c])
+
+        # Build recommendations DataFrame
+        recs = pd.DataFrame({
+            "vehicle_type": df_input["vehicle_type"],
+            "confidence": confidences
+        }).sort_values("confidence", ascending=False)
+
+        return recs
+
+    def predict_seasonal_demand(
+            self,
+            df: pd.DataFrame,
+            location: str,
+            vehicle_types: List[str]
+    ) -> pd.DataFrame:
+        """
+        Predicts seasonal demand for a particular location across multiple vehicle types.
+        """
+
+        # Hard-coded next seasons
+        future_seasons = ["Spring", "Summer", "Autumn", "Winter"]
+
+        # Ensure date column is standardised
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], dayfirst=True, errors="coerce")
+        elif "pickup_date" in df.columns:
+            df["date"] = pd.to_datetime(df["pickup_date"], dayfirst=True, errors="coerce")
+        else:
+            raise ValueError("DataFrame must have a 'date' or 'pickup_date' column.")
+
+        # Filter for selected location
+        df_loc = df[df["location"] == location].copy()
+        df_loc.dropna(subset=["demand", "vehicle_type", "pickup_date_quarter"], inplace=True)
+
+        quarter_to_season = {1: "Spring", 2: "Summer", 3: "Autumn", 4: "Winter"}
+        df_loc["season"] = df_loc["pickup_date_quarter"].map(quarter_to_season)
+
+        # Group historical demand
+        grouped = (
+            df_loc.groupby(["vehicle_type", "season"], as_index=False)
+            .agg({"demand": "mean"})
+            .rename(columns={"demand": "avg_historical_demand"})
+        )
+
+        # Prepare training set
+        season_map = {season: i for i, season in enumerate(["Spring", "Summer", "Autumn", "Winter"])}
+        grouped["season_num"] = grouped["season"].map(season_map)
+
+        unique_vtypes = grouped["vehicle_type"].unique().tolist()
+        vtype_map = {v: i for i, v in enumerate(unique_vtypes)}
+        grouped["vehicle_type_num"] = grouped["vehicle_type"].map(vtype_map)
+
+        X_train = grouped[["season_num", "vehicle_type_num"]]
+        y_train = grouped["avg_historical_demand"]
+
+        if len(X_train) < 2:
+            logging.warning("Not enough data to train a reliable seasonal model.")
+            return pd.DataFrame(columns=["season", "location", "vehicle_type", "predicted_demand"])
+
+        # Train a lightweight model for demonstration
+        model = RandomForestRegressor(random_state=42)
+        model.fit(X_train, y_train)
+
+        # Predict for upcoming seasons
+        future_combos = [(s, vt) for s in future_seasons for vt in vehicle_types]
+        future_df = pd.DataFrame(future_combos, columns=["season", "vehicle_type"])
+        future_df["season_num"] = future_df["season"].map(season_map)
+        future_df["vehicle_type_num"] = future_df["vehicle_type"].map(vtype_map).fillna(-1)
+
+        X_pred = future_df[["season_num", "vehicle_type_num"]]
+        preds = model.predict(X_pred)
+
+        future_df["predicted_demand"] = preds
+        future_df["location"] = location
+        future_df.sort_values(["season", "vehicle_type"], inplace=True)
+        future_df = future_df[["season", "location", "vehicle_type", "predicted_demand"]]
+
+        return future_df
+
+    def save_model(self, model_path: str) -> None:
+        """
+        Save the trained model and encoders to disk.
+        """
+        # XGBoost-specific save
+        self.vehicle_model.save_model(model_path + "_xgb_model.json")
+
+        # Save encoders using pandas or joblib
+        import joblib
         joblib.dump({
-            'demand_model': self.demand_model,
-            'vehicle_model': self.vehicle_model,
-            'location_encoder': self.location_encoder,
-            'vehicle_type_encoder': self.vehicle_type_encoder,
-            'scaler': self.scaler,
-            'feature_importance': self.feature_importance
-        }, path)
-    
-    def load_model(self, path: str):
-        """Load both models and their components"""
-        components = joblib.load(path)
-        self.demand_model = components['demand_model']
-        self.vehicle_model = components['vehicle_model']
-        self.location_encoder = components['location_encoder']
-        self.vehicle_type_encoder = components['vehicle_type_encoder']
-        self.scaler = components['scaler']
-        self.feature_importance = components['feature_importance']
+            "location_encoder": self.location_encoder,
+            "vehicle_type_encoder": self.vehicle_type_encoder,
+            "feature_cols": self.feature_cols
+        }, model_path + "_encoders.pkl")
+
+    def load_model(self, model_path: str) -> None:
+        """
+        Load the trained model and encoders from disk.
+        """
+        import joblib
+        # Load XGBoost model
+        self.vehicle_model = xgb.XGBClassifier()
+        self.vehicle_model.load_model(model_path + "_xgb_model.json")
+
+        # Load encoders
+        data = joblib.load(model_path + "_encoders.pkl")
+        self.location_encoder = data["location_encoder"]
+        self.vehicle_type_encoder = data["vehicle_type_encoder"]
+        self.feature_cols = data["feature_cols"]
