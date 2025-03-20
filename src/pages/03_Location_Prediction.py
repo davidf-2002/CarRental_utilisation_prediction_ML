@@ -5,11 +5,14 @@ import streamlit as st
 from datetime import timedelta
 from models.location_predictor import LocationPredictor
 
+from analytics.HyperParameter_Tuning.XGBTuner import XGBTuner
+
 # Configuration
 st.set_page_config(page_title="Location Demand Prediction", layout="wide")
 
 DATA_PATH = os.path.join("data", "processed_car_rental.csv")
 MODEL_PATH = os.path.join("models", "vehicle_recommender.joblib")
+
 
 # Utility Functions
 def load_data(data_path: str) -> pd.DataFrame:
@@ -39,6 +42,7 @@ def load_data(data_path: str) -> pd.DataFrame:
 
     return df
 
+
 def display_dataset_info(df: pd.DataFrame):
     """
     Displays a quick overview of the dataset: number of records, date range, and used columns.
@@ -49,6 +53,7 @@ def display_dataset_info(df: pd.DataFrame):
     date_max = df['date'].max().date()
     st.write(f"Date range: {date_min} to {date_max}")
 
+
 def display_feature_info():
     """
     Displays the primary features used in the model.
@@ -58,40 +63,43 @@ def display_feature_info():
     st.write("- Vehicle: Type, Historical performance")
     st.write("- Location: Historical demand, ratings")
 
-def train_models(df: pd.DataFrame) -> None:
+
+def train_model(df: pd.DataFrame, predictor: LocationPredictor) -> None:
     """
     Trains the vehicle type recommendation model,
     displays training metrics,
     and saves the trained models to disk.
     """
-    required_cols = ["pickup_city", "vehicle_type", "pickup_date", "rate.daily", "rating"]
+    required_cols = ["pickup_city", "vehicle_type", "pickup_date"]
     missing_cols = [col for col in required_cols if col not in df.columns]
 
     if missing_cols:
         st.error(f"Missing required columns: {', '.join(missing_cols)}")
         return
 
-    predictor = LocationPredictor()
-
     try:
+        # ------------------------------
+        # 1. Hyperparameter Tuning Step
+        # ------------------------------
+
+        st.info("Starting hyperparameter tuning...")
+        tuner = XGBTuner()
+
+        predictor.fit_encoders(df)
+        with st.spinner("Tuning hyperparameters..."):
+            tuner.tune_model(predictor, df, cv=5)
+        st.success("Hyperparameter tuning complete!")
+
+        # ------------------------------
+        # 2. Train the Model with Tuned Parameters
+        # ------------------------------
         with st.spinner("Training models..."):
-            metrics = predictor.train(df)
-
-        # Display success and metrics
+            predictor.train(df)
         st.success("Models trained successfully!")
-        st.subheader("Model Performance")
 
-        # Vehicle model metrics
-        vehicle_metrics = metrics["vehicle_metrics"]
-        st.write("**Vehicle Type Recommendation Model**:")
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric("Accuracy", f"{vehicle_metrics['accuracy']:.3f}")
-        with c2:
-            st.text("Classification Report:")
-            st.text(vehicle_metrics['classification_report'])
-
-        # Save model
+        # ------------------------------
+        # 3. Save the Final Model
+        # ------------------------------
         predictor.save_model(MODEL_PATH)
         st.success("Model saved successfully! You can now make predictions.")
 
@@ -99,7 +107,29 @@ def train_models(df: pd.DataFrame) -> None:
         st.error(f"Error training model: {str(e)}")
         st.error("Please ensure the data format is correct and try again.")
 
-def predict_future(df: pd.DataFrame) -> None:
+
+def display_model_metrics(df: pd.DataFrame, predictor: LocationPredictor) -> None:
+    """
+    Displays the metrics of the trained model.
+    """
+
+    st.subheader("Model Performance")
+    # Show the trained model parameters
+    st.write(predictor.vehicle_model.get_params())
+
+    vehicle_metrics = predictor.evaluate(df)
+
+    st.write("**Vehicle Type Recommendation Model**:")
+    c1, c2 = st.columns(2)
+    with c1:
+        # Correctly access accuracy from the nested dictionary
+        st.metric("Accuracy", f"{vehicle_metrics['vehicle_metrics']['accuracy']:.3f}")
+    with c2:
+        st.text("Classification Report:")
+        st.text(vehicle_metrics['vehicle_metrics']['classification_report'])
+
+
+def predict_future(df: pd.DataFrame, predictor: LocationPredictor) -> None:
     """
     Loads the trained model, then provides:
      - Vehicle type recommendations for a user-selected date and location.
@@ -109,7 +139,6 @@ def predict_future(df: pd.DataFrame) -> None:
         st.warning("Please train the model before making predictions.")
         return
 
-    predictor = LocationPredictor()
     predictor.load_model(MODEL_PATH)
 
     # Convert columns for consistency
@@ -278,14 +307,23 @@ def main():
     with col2:
         display_feature_info()
 
-    if st.button("Train Model"):
-        train_models(df)
+    # Load predictor instance
+    predictor = LocationPredictor()
+
+    # Check if model already exists and load it
+    if os.path.exists(MODEL_PATH + "_xgb_model.json"):
+        st.warning("A trained model already exists. If you want to retrain, please reset or delete the existing model.")
+        predictor.load_model(MODEL_PATH)
+        display_model_metrics(df, predictor)  # Show existing model metrics
+    else:
+        if st.button("Train Model"):
+            train_model(df, predictor)
+            display_model_metrics(df, predictor)
 
     # Section 2: Future Predictions
     st.header("2. Future Predictions")
-    predict_future(df)
+    predict_future(df, predictor)
 
 
 if __name__ == "__main__":
     main()
-
